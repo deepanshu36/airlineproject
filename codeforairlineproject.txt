@@ -1,0 +1,171 @@
+
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+  
+sc = SparkContext.getOrCreate()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+# dyf = glueContext.create_dynamic_frame.from_catalog(database="airlinedatabase", table_name="flights_csv")
+# dyf.printSchema()
+
+database_name = "airlinedatabase"
+airline_name = "dev_airlines_airports_dim"
+flights_name = "newdata"
+
+flightsdf = glueContext.create_dynamic_frame.from_catalog(
+    database=database_name,
+    table_name=flights_name, 
+).toDF()
+
+# flightsdf.show(10)
+
+airlinedf = glueContext.create_dynamic_frame.from_catalog(
+    database=database_name,
+    table_name=airline_name,
+    redshift_tmp_dir="s3://tempredshiftdirec/temp/",
+    transformation_ctx="AirportDimTableFromRedshift_node1693406103666"
+    
+).toDF()
+
+airlinedf.show(10)
+
+
+
+airlinedf.printSchema()
+flightsdf.printSchema()
+
+
+
+
+flightsdf=flightsdf.filter(flightsdf.depdelay>60)
+flightsdf.show()
+
+
+
+
+joined=flightsdf.join(airlinedf,flightsdf.originairportid==airlinedf.airport_id,'left')
+
+lis=["airport_id","originairportid"]
+
+# origindf=joined.drop(joined.airport_id,joined.originairporti)
+
+origindf=joined.drop(*lis)
+
+
+origindf=origindf.withColumnRenamed("city","dep_city")\
+                 .withColumnRenamed("state","dep_state")\
+                 .withColumnRenamed("name","dep_airport_name") 
+    
+origindf.show()
+
+
+
+# finding arrival city
+joined2=origindf.join(airlinedf,origindf.destairportid==airlinedf.airport_id,'left')
+
+# destdf=joined2.drop(joined.airport_id)
+
+
+
+joined2= joined2.withColumnRenamed('city','arr_city')\
+                .withColumnRenamed('state','arr_state')\
+                .withColumnRenamed('name','arr_airport_name') 
+    
+lis2=["destairportid","airport_id"]
+
+finaldf=joined2.drop(*lis2)
+
+finaldf.show()
+
+finaldf.show(10)
+
+
+
+
+# finaldf.printSchema()
+
+
+from awsglue.dynamicframe import DynamicFrame
+
+# finaldf.write \
+#   .format("jdbc") \
+#   .option("url", "jdbc:redshift://redshift-cluster-1.c0rynwjgnkgf.eu-north-1.redshift.amazonaws.com:5439/dev") \
+#   .option("dbtable", "finaltable") \
+#   .option("user", "awsuser") \
+#   .option("password", "Pa$$word889")\
+#   .option("tempdir", "s3://your-s3-bucket/temp/") \
+#   .mode("error") \
+#   .save()gluedf=
+
+gluedf=DynamicFrame.fromDF(finaldf,glueContext,"gluedf")
+
+gluedf.printSchema()
+
+# AmazonRedshift_node3 =
+
+glueContext.write_dynamic_frame.from_options(
+    frame=gluedf,
+    connection_type="redshift",
+    connection_options={
+        "redshiftTmpDir": "s3://tempredshiftdirec/temp/",
+        "useConnectionProperties": "true",
+        "dbtable": "airlines.finaltable",
+        "connectionName": "redshiftconnection",
+        "preactions": "CREATE TABLE IF NOT EXISTS airlines.daily_flights_fact (carrier VARCHAR, dep_delay VARCHAR, arr_delay VARCHAR, dep_city VARCHAR, dep_airport VARCHAR, dep_state VARCHAR, arr_city VARCHAR, arr_airport VARCHAR, arr_state VARCHAR);"
+    },
+    transformation_ctx="AmazonRedshift_node3",
+) 
+
+
+
+
+
+
+
+
+
+
+
+
+# AmazonRedshift_node3 = glueContext.write_dynamic_frame.from_options(
+#     frame=ChangeSchema_node2,
+#     connection_type="redshift",
+#     connection_options={
+#         "redshiftTmpDir": "s3://aws-glue-assets-348532040329-us-east-1/temporary/",
+#         "useConnectionProperties": "true",
+#         "dbtable": "airlines.daily_flights_fact",
+#         "connectionName": "redshift-connection",
+#         "preactions": "CREATE TABLE IF NOT EXISTS airlines.daily_flights_fact (carrier VARCHAR, dep_delay VARCHAR, arr_delay VARCHAR, dep_city VARCHAR, dep_airport VARCHAR, dep_state VARCHAR, arr_city VARCHAR, arr_airport VARCHAR, arr_state VARCHAR);"
+#     },
+#     transformation_ctx="AmazonRedshift_node3",
+# )
+
+
+
+
+# finaldf.write \
+#     .format("jdbc") \
+#     .option("url", "jdbc:redshift://redshift-cluster-1.c0rynwjgnkgf.eu-north-1.redshift.amazonaws.com:5439/dev") \
+#     .option("dbtable","finaltable") \
+#     .option("user", "awsuser") \
+#     .option("password", "Pa$$word889") \
+#     .option("driver","com.amazon.redshift.jdbc.Driver") \
+#     .mode("overwrite") \
+#     .save()
+
+# df.write \
+#     .format("com.databricks.spark.redshift") \
+#     .option("url", redshift_url) \
+#     .option("dbtable", redshift_table) \
+#     .option("user", redshift_user) \
+#     .option("password", redshift_password) \
+#     .option("tempdir", "s3://your-s3-bucket/temp/") \
+#     .mode("overwrite") \
+#     .save()
+
+job.commit()
