@@ -1,0 +1,224 @@
+1. Explain the differences between Facebook Ads, Google Ads, RDS (Relational Database
+Service), and CleverTap in terms of data structure, API access, and data types.
+
+Facebook and google ads have a hierarcal data in json format,as key value pair
+for every field like ad sets and ad group with multiple ads inside group key pair for facebok and google respectively.
+
+
+facebook :
+{
+  "campaign":1,
+   "adset": [
+             {"setid":"11","adid": "A", "addname":"exampleadd"},
+             {"setid":"11","adid": "A", "addname":"exampleadd"},
+             {"setid":"11","adid": "A", "addname":"exampleadd"},
+             {"setid":"11","adid": "A", "addname":"exampleadd"}
+
+            ]
+}
+
+similary in googleads we wil have a adgroup instead of add set.
+
+in RDS, we will have the data in rows and column format in the table,
+ each column has a data type predefined which will be same for every entry in a row for that column in the table.
+
+in CleverTap, i observe that they store event based user profiles, accordingly what time the 
+logged in or made any purchase or logged out.
+they are also hierarchical data but has event based information of the user.
+{
+  "userid":112asf,
+   "events": [
+            {"launch": "App Launched", "timestamp": "2024-07-08T12:34:56Z"},
+            {"tranaction": "Purchase", "timestamp": "2024-07-08T12:45:00Z"},
+            {"logout": "logout", "timestamp": "2024-07-08T12:45:00Z"}
+            ]
+}
+
+2. Data pipeline architecture 
+   a. Understanding of data, the type,volume,frequency and size of data recieved on hourly,daily and monthy basis.
+
+import requests
+import logging
+import boto 3
+def fb_data(access_token, ad_account_id,today):
+    url = f"https://graph.facebook.com/v10.0/{ad_account_id}/ads"
+    params = {
+        'access_token': access_token,
+        'fields': 'id,name,set_id',
+        'limit': 100,
+        'since': date,
+        'until': date
+    }
+    all_data = []
+    retry=0
+    while True:
+       
+       try:
+        response = requests.get(url, params=params)
+        data = response.json()
+        if response.status_code != 200:
+            logging.error(f"Error fetching Facebook Ads data:{data}, tries left :{retry}")
+            //move it to failed s3 bucket location ?? 
+            break
+        all_data.extend(data.get('data', []))
+        paging = data.get('paging', {})
+        next_page = paging.get('next') // it will keep on  creating pages until no more records are left
+        if not next_page:
+            break
+        params['after'] = paging['cursors']['after']  // it is done to move it to next page of results.
+          
+         if retry<=3:
+            continue
+         else:
+           break 
+              
+       catch exception e:
+          print("error getting data from the api")  
+ 
+   
+    return all_data   // all the appended data will be present in all data. we will need to put this in our AWS S3 bucket location.
+
+saving data to S3 location from where spark will access it.file path will contain our date coming from 'date'
+
+// we will provide access key and secret access key in 
+def save_to_s3(data, bucket_name, s3_file_path):
+    s3_client = boto3.client('s3')
+    s3_client.put_object(Body=json.dumps(data), Bucket=bucket_name, Key=s3_file_path)
+
+save_to_s3(facebook_data, '<BUCKET_NAME>', f'facebook_ads_data/{today}.json')
+
+
+# Example usage
+import datetime
+today = datetime.date.today()
+fb_data = fb_data('<ACCESS_TOKEN>', '<AD_ACCOUNT_ID>',today)
+            
+access token and ad accountid will be coming from the account from which we are importing the data, we can get it from the console of facebook ad page.
+
+paging implemetation.
+ i have tried to implement paging in this to prevent overloading our systems and fetching the data in smaller manageable chunks.
+so lets say we have 1 million records in the data and we fetch 100 records at a time then 10,000 pages will be created to read a million records for any particular day.
+
+in case of failure, we can try to retry it , until we do not get the data, keeping the max tries at 3.
+
+we can create something similar for google ads as well, the only change will be in the fields like setid will change to group id 
+and url of the api , credentials from which we will be extracting the data, rest of the things will be the same.
+
+
+Spark job :
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+
+def create_spark_session():
+    spark = SparkSession.builder \
+        .appName("Ads") \
+        .getOrCreate()
+    return spark
+
+def transform_facebook_data_spark(fb_data):
+    spark = create_spark_session()
+    df = spark.read.option("multiline",true).json(fb_data_s3_location)
+    df = df.withColumn('source', lit('facebook')).withColumn('timestamp', current_timestamp())
+    return df
+
+def transform_google_data_spark(google_data):
+    spark = create_spark_session()
+    df = spark.read.option("multiline",true).json(google_data_s3_location)
+    df = df.withColumn('source', lit('facebook')).withColumn('timestamp', current_timestamp())
+    return df
+
+note: we may need to flatten the json depending on hierarchy, if it is an array we may need to explode 
+and if it is a structure we will not explode, depends upon the hierarchy.
+
+
+RDSload script
+
+def load_data_to_rds_spark(df, db_url, table_name):
+        df.write \
+        .format("jdbc") \
+        .option("url", db_url) \
+        .option("dbtable", table_name) \
+        .option("user", "dev") \
+        .option("password", "123") \
+        .mode('append') \
+        .save('provide_location_to_save_file')
+
+
+
+Airflow :
+ we will be creating an airflow dag with 3 task, running in parallel.
+
+extract_facebook_task>>spark_job_transformed_data>>loadinRDS
+extract_google_task >>spark_job_tranformed_data>>loadinRDS
+
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2024, 7, 10),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
+
+dag = DAG(
+    'facebook_google_ads_etl',
+    default_args=default_args,
+    description='ETL for Fb data',
+    schedule_interval=timedelta(days=1),
+)
+
+dag = DAG('etlspark', default_args=default_args, schedule_interval='@daily')
+
+
+In real world scenario,
+if our URL gets changed from lets say for past one day or week, which is leading to our pipeline getting failed then 
+we may need to make changes to our pipeline to run from day 1 to day 7 by changing since and until fields in our pyton scripts.
+
+
+
+if you want to create a spark job that workks with json and store data directly to ur aws redshift database then
+for reading json, put multiline as true, depending upon ur data in spark while reading it, and the u will need to provide 
+ur amazon cluster details, database and tablename where u want to append it.
+if u use a amazon glue dynamic data frame u can also create a new table dynamicaly in tha database of the cluster and then append those values in 
+the table.
+
+snippet below,from my personal project code 
+
+# finaldf.write \
+#   .format("jdbc") \
+#   .option("url", "jdbc:redshift://redshift-cluster-1.c0rynwjgnkgf.eu-north-1.redshift.amazonaws.com:5439/dev") \
+#   .option("dbtable", "finaltable") \
+#   .option("user", "awsuser") \
+#   .option("password", "Pa$$word889")\
+#   .option("tempdir", "s3://your-s3-bucket/temp/") \
+#   .mode("error") \
+#   .save() 
+
+
+
+
+ 
+
+
+  
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
